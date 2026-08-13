@@ -4,6 +4,8 @@ An independent, warts-and-all review of **DeepSeek Harness (`dsh`)** — DeepSee
 open-source agent harness — published here as 8 self-contained HTML pages with
 diagrams.
 
+**Read it: https://az9713.github.io/deepseek-harness-deepdive/**
+
 ## Which version this reviews
 
 Every claim in these pages was verified against one exact snapshot of upstream.
@@ -53,8 +55,11 @@ Three colours carry meaning throughout:
 
 ## How to view
 
-The pages are self-contained. The CSS and the SVG diagrams are inside each file
-and nothing loads from the network, so a local clone works with no build step:
+Online, at **https://az9713.github.io/deepseek-harness-deepdive/**.
+
+Or locally. The pages are self-contained — the CSS and the SVG diagrams are
+inside each file and nothing loads from the network — so a clone works with no
+build step:
 
 ```
 git clone https://github.com/az9713/deepseek-harness-deepdive.git
@@ -63,7 +68,7 @@ start index.html      # Windows; use "open" on macOS, "xdg-open" on Linux
 ```
 
 Note that GitHub's file view shows HTML source rather than the rendered page.
-Clone it, or enable GitHub Pages on this repository, to read it as intended.
+Use the Pages link above, or a local clone, to read it as intended.
 
 ## Status
 
