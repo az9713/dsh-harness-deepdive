@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Verdict — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a class="cur" href="verdict.html">Verdict</a></nav>
+<main>
+<h1>Verdict: adopt, study, or wait?</h1>
+<h2>The short answer</h2>
+<p><strong>Study it now; do not build production on it yet.</strong> dsh is a genuinely
+well-architected agent harness and an even more valuable case study in
+agent-driven development — but it is a developer preview that promises to break,
+accepts no external contributions, and rests its safety on a single boundary
+that leaves several capabilities uncovered. Read it, copy its best ideas,
+prototype against it if you like churn — but do not ship a product whose
+foundation is a thing its own authors say has no compatibility floor.</p>
+<h2>Who should do what</h2>
+<p><strong>If you are designing your own harness:</strong> this is required reading. Steal, in
+priority order: the log-as-single-source-of-truth with a runtime desync
+invariant (strength 1), the single-sourced prompt/executor predicates (strength
+4), monotonic guards-by-type (strength 5), fail-closed defaults everywhere
+(strength 2), and the honest "this is not a boundary" comment discipline
+(strength 3). These are portable design ideas independent of Cordis.</p>
+<p><strong>If you want to run an agent on a trusted machine over trusted input:</strong> dsh is
+usable today via <code>dsh web</code> or headless, with the caveat that its confinement
+means "keeps file writes in the workspace", not "safe against hostile content".
+Understand <a href="weaknesses.html">Theme A</a> before you point it at anything you did not
+write.</p>
+<p><strong>If you want to run an agent over untrusted input, or ship a product on it:</strong>
+wait. There is no command-level shell gate, <code>run_code</code> escapes the file
+sandbox, there is no web authentication, and the whole surface is explicitly
+non-contractual. The security model is honest but thin, and the version line is
+churning daily.</p>
+<p><strong>If you are running your own high-velocity, agent-heavy team:</strong> the most
+transferable asset in this repo is not the harness — it is <code>.agents/</code> and the
+process around it. The mandatory-Agent-Note discipline, the
+chain-of-thought-leakage scrubbing skill, the "verify external state, never
+trust an agent's report" review rule, and the postmortems are a working
+playbook for keeping agent-generated code honest at 39 PRs/day. Copy the
+practices; you do not need the harness to use them.</p>
+<h2>What to copy, concretely</h2>
+<ol>
+<li><strong>A durable event log that the model's request is <em>derived from</em>, checked by
+   a runtime invariant</strong> — the highest-leverage idea here.</li>
+<li><strong>Generate the model's rule text and the executor's enforcement from one
+   predicate.</strong></li>
+<li><strong>Make safety properties type properties</strong> (deny-only guards) rather than
+   review disciplines.</li>
+<li><strong>Comment honestly where a boundary is not a boundary</strong> — and then remember
+   that a green freshness gate does not make a generated doc <em>true</em>
+   (<a href="weaknesses.html">Theme B</a>).</li>
+<li><strong>Force per-package "Known Limitations" sections and write postmortems about
+   process failure, not just bug fixes.</strong></li>
+</ol>
+<h2>What to distrust</h2>
+<ul>
+<li><strong>The generated capability/tool docs</strong> — eight verified drifts from code;
+  read the source, not <code>docs/tool-catalog.md</code> or <code>docs/capability-seams.md</code>,
+  when it matters.</li>
+<li><strong>The word "sandbox"</strong> in any doc — check whether the specific path is
+  kernel-enforced (process argv) or advisory (fs fence, workflow VM, code
+  runtime).</li>
+<li><strong>Any <code>file:line</code> in this very review</strong> after upstream moves — the repo
+  changes ~104 commits a day and promises breaking changes; re-verify before
+  relying on a claim.</li>
+<li><strong>Coverage and CI green</strong> as a completeness signal — the 100% gate exempts
+  the client half, and master pushes currently get almost no hosted validation.</li>
+</ul>
+<h2>The one-paragraph bottom line</h2>
+<p>DeepSeek Harness is a serious, unusually honest piece of engineering built at
+extraordinary speed by a small team and a fleet of agents. Its architecture —
+everything-is-a-plugin over a vendored framework, with an enforced
+event-sourced session log — is sound and worth learning from. Its weaknesses
+are the weaknesses of its method and its stage: a security model with one
+boundary doing all the work, elaborate automation that guards format and
+freshness while correctness drifts underneath it, god files and a fix-heavy
+history from high-throughput generation, and a formal promise that none of it is
+stable yet. The most remarkable thing in the repository is that it tells you
+almost all of this about itself, in its own comments and postmortems, if you
+read closely — which is exactly what this review did.</p>
+</main>
+</body>
+</html>

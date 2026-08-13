@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Capabilities & security — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a class="cur" href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>Capabilities and security: one boundary doing all the work</h1>
+<p>This is the most important chapter for anyone weighing adoption. The tool
+pipeline is the strongest-engineered part of the codebase. The <em>permission and
+sandboxing model</em> around it is a single real boundary carrying the entire load,
+with several capabilities living outside it — and the code is unusually honest
+about saying so.</p>
+<h2>How a tool is defined and run</h2>
+<p>A tool is authored one of two ways. First-party tools use <code>defineTool(...)</code>
+(<code>packages/core/tools/src/schema.ts:544</code>), which compiles a parameter spec and
+validates arguments <em>inside</em> the execute body
+(<code>schema.ts:588-592</code>). Anything satisfying the <code>ToolDefinition</code> interface
+(<code>packages/core/tools/src/index.ts:222</code>) — MCP tools, dynamic Cordis tools —
+is a raw tool. Registration performs three load-time checks (supported output
+schema, positive timeout, no shadowing the reserved <code>run_code</code> transport name;
+<code>index.ts:1045-1056</code>) but deliberately does <strong>not</strong> validate <code>description</code> or
+<code>parameters</code> — it only snapshots them (<code>index.ts:1256-1266</code>).</p>
+<p>Registrations live in scoped layers so a subagent can be handed a restricted
+tool set (<code>index.ts:811</code>, <code>:1152</code>). Execution is a well-built pipeline:
+arguments are snapshotted to lossless JSON and deep-frozen
+(<code>index.ts:1364</code>, <code>:1416</code>); the caller's cancellation signal is re-fused over
+any wrapper replacement so a middleware cannot detach cancellation
+(<code>index.ts:1536-1544</code>); results are validated against the declared output
+schema; and <code>tools/result</code> observers receive a frozen snapshot
+(<code>index.ts:1657-1660</code>).</p>
+<p>The pipeline's genuine strengths:</p>
+<ul>
+<li><strong>Fail-closed is the house style and it is implemented, not claimed.</strong>
+  Missing approval service → deny (<code>index.ts:1694-1699</code>); a rogue approval
+  answerer's return is normalized to <code>unavailable</code>
+  (<code>packages/interaction/user-approval/src/index.ts:325</code>); no sandbox runner →
+  the command never runs (<code>packages/sandbox/sandbox-local/src/index.ts:494</code>).</li>
+<li><strong>Guards are monotonic by type.</strong> A <code>ToolGuard</code> can only return a deny
+  reason or <code>undefined</code> — there is no "allow" value
+  (<code>packages/core/tools/src/index.ts:711</code>), so registration order can never
+  resurrect a denied call.</li>
+<li><strong>Security-relevant predicates are single-sourced.</strong> The Code-Mode collapse
+  rule the <em>prompt</em> tells the model is literally the same function the
+  <em>executor</em> denies by (<code>index.ts:861</code> feeds the prompt, <code>:1325</code> gates
+  execution) — the model can never be told a rule the executor doesn't
+  enforce.</li>
+</ul>
+<h2>What a "capability seam" is</h2>
+<p>A seam is a Cordis <code>Service</code> subclass plus a <code>declare module</code> Context
+augmentation, owned by an interface-only package, with N implementation
+packages registering under the same key
+(<code>packages/sandbox/sandbox/src/index.ts:146-176</code>). Consumers read <code>ctx.sandbox</code>
+and never name a backend; swapping is composition-only. This is the same
+pattern as the plugin model, applied to capabilities: the file sandbox, the
+shell, the filesystem, subprocess execution, and the LLM adapter are all seams.</p>
+<h2>The security model, as one picture</h2><figure><svg viewBox="0 0 860 480" role="img" aria-label="The security model in one picture">
+<rect x="20" y="36" width="400" height="190" fill="#0f172a" stroke="#2dd4bf" rx="8" stroke-width="2.5"/>
+<text x="220" y="62" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">the one real enforcement boundary</text>
+<text x="220" y="84" text-anchor="middle" fill="#2dd4bf" font-size="11">kernel process sandbox</text>
+<text x="220" y="100" text-anchor="middle" fill="#2dd4bf" font-size="11">bwrap · Landlock · Seatbelt · Windows-ACL</text>
+<rect x="45" y="120" width="350" height="56" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="220" y="143" text-anchor="middle" fill="#94a3b8" font-size="11">subprocess argv — bash / pwsh</text>
+<text x="220" y="160" text-anchor="middle" fill="#94a3b8" font-size="11">confines where file writes land</text>
+<text x="220" y="204" text-anchor="middle" fill="#2dd4bf" font-size="11">fails closed when no runner is available</text>
+<rect x="20" y="250" width="400" height="106" fill="#0f172a" stroke="#2dd4bf" rx="8" stroke-dasharray="6 5"/>
+<text x="220" y="276" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">fs fence — advisory only</text>
+<text x="220" y="298" text-anchor="middle" fill="#94a3b8" font-size="11">&#8220;a policy check in TRUSTED code over a</text>
+<text x="220" y="314" text-anchor="middle" fill="#94a3b8" font-size="11">MODEL-CONTROLLED path, NOT a kernel boundary&#8221;</text>
+<text x="220" y="338" text-anchor="middle" fill="#fb923c" font-size="11.5">reads are never fenced, under every mode</text>
+<text x="640" y="28" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600" fill="#fb923c">outside the boundary</text>
+<rect x="460" y="40" width="380" height="72" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="650" y="64" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">network egress</text>
+<text x="650" y="82" text-anchor="middle" fill="#94a3b8" font-size="11">sandbox vocabulary excludes the network:</text>
+<text x="650" y="98" text-anchor="middle" fill="#94a3b8" font-size="11">curl | sh, ssh, git push — no prompt, no gate</text>
+<rect x="460" y="128" width="380" height="72" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="650" y="152" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">run_code</text>
+<text x="650" y="170" text-anchor="middle" fill="#94a3b8" font-size="11">worker thread, full Node API reachable —</text>
+<text x="650" y="186" text-anchor="middle" fill="#94a3b8" font-size="11">file access confined by nothing (env-var gated)</text>
+<rect x="460" y="216" width="380" height="72" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="650" y="240" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">web surface</text>
+<text x="650" y="258" text-anchor="middle" fill="#94a3b8" font-size="11">no authentication — loopback-only</text>
+<text x="650" y="274" text-anchor="middle" fill="#94a3b8" font-size="11">by construction is the entire model</text>
+<rect x="460" y="304" width="380" height="72" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="650" y="328" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">headless surface</text>
+<text x="650" y="346" text-anchor="middle" fill="#94a3b8" font-size="11">no approval answerer mounted —</text>
+<text x="650" y="362" text-anchor="middle" fill="#94a3b8" font-size="11">every ask and escalation deterministically denies</text>
+<rect x="20" y="404" width="820" height="52" fill="#0f172a" stroke="#fb923c" rx="8" stroke-width="2"/>
+<text x="430" y="426" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">DSH_PERMISSION_MODE=danger-full-access</text>
+<text x="430" y="444" text-anchor="middle" fill="#fb923c" font-size="11.5">one env var removes the sandbox and the approval prompts together</text>
+</svg><figcaption>One kernel boundary (teal, solid) carries the whole load. The fs fence is advisory (dashed). Everything orange lives outside the boundary.</figcaption></figure>
+<p>There is <strong>exactly one real enforcement boundary</strong>: a kernel/OS-level process
+sandbox that wraps subprocess argv. It selects a runner by platform —
+<code>linux: ['bwrap','landlock']</code>, <code>darwin: ['seatbelt']</code>, <code>win32:
+['windows-acl']</code> (<code>packages/sandbox/sandbox-local/src/index.ts:159-166</code>) — and
+fails closed when none is available (<code>:494-502</code>). The seam contract forbids
+silent unconfined passthrough (<code>packages/sandbox/sandbox/src/index.ts:154-156</code>).
+This part is good.</p>
+<p>Everything else is either advisory or absent, and here is the honest inventory:</p>
+<p><strong>1. The shell tool has no command-level permission gate at all.</strong> Its own
+source says so (<code>packages/shell/tool-bash/src/index.ts:6</code>):</p>
+<pre><code> * TODO(permissions): deployment policy belongs in `tools/pre-execute` and
+ * sandboxing executors; see docs/architecture.md § Where new behavior goes.
+</code></pre>
+<p>Under the shipped default mode (<code>workspace-write</code>), the model can run any
+command with no prompt as long as file <em>writes</em> land in the workspace —
+including <code>curl | sh</code>, <code>git push --force</code>, <code>ssh</code>, and arbitrary network egress.
+The sandbox vocabulary explicitly excludes the network
+(<code>packages/sandbox/sandbox/src/index.ts:26-27</code>: <em>"Network and process
+visibility are outside this vocabulary"</em>). The kernel sandbox limits where
+files land; it does nothing about what commands do over the network.</p>
+<p><strong>2. <code>run_code</code> executes outside the file sandbox entirely.</strong> The file fence
+(<code>fs-sandbox</code>) covers <code>ctx.fs</code> and the process sandbox covers subprocess argv,
+but <code>run_code</code> is a worker thread whose only limits are env, flags, and heap
+(<code>packages/code-runtime/code-runtime-worker-thread/src/index.ts:378-387</code>),
+evaluating the model's program as an <code>AsyncFunction</code> with the full Node API
+reachable. The module claims "bash-equivalent trust" (<code>index.ts:3-4</code>) but that
+undersells the gap: shipped bash is kernel-confined; <code>run_code</code> file access is
+confined by nothing. It is gated behind one env var (<code>DSH_TOOLS_MODE</code>), and
+nothing warns that turning it on widens the file boundary.</p>
+<p><strong>3. The web surface has no authentication</strong> — loopback-only by construction
+instead (see <a href="what-is-dsh.html">what-is-dsh.html</a>). This is a defensible choice,
+honestly labeled, but it means anything that can issue a loopback request with
+a loopback <code>Host</code> header owns the machine.</p>
+<p><strong>4. The approval channel is absent in most surfaces.</strong> The only
+<code>approval/request</code> answerers in the repo are the ACP bridge
+(<code>packages/acp/acp/src/index.ts:215</code>) and the web host. The headless bundle
+mounts neither — so in headless, every <code>ask</code> decision and every sandbox
+escalation request deterministically denies. There is no interactive approval
+for the one-shot runner.</p>
+<p><strong>5. One env var removes both the sandbox and the prompts.</strong>
+<code>DSH_PERMISSION_MODE=danger-full-access</code> makes the shell executor bypass the
+sandbox (<code>packages/shell/bash-sandbox/src/index.ts:91-93</code>), makes the fs fence
+return the raw path (<code>packages/fs/fs-sandbox/src/index.ts:129</code>), and the base
+bundle sets the approval policy to <code>never</code> in the same mode. A single
+environment variable is the difference between confined and wide open.</p>
+<p><strong>6. The file fence is advisory, and reads are never fenced.</strong> <code>fs-sandbox</code>'s
+own header is candid (<code>packages/fs/fs-sandbox/src/index.ts:11-18</code>): <em>"a policy
+check in TRUSTED code over a MODEL-CONTROLLED path, NOT a kernel boundary"</em>
+with an accepted residual TOCTOU. Reads pass through under every mode (<code>:8</code>),
+so <code>read</code>/<code>glob</code>/<code>grep</code> can exfiltrate anything the process can read
+regardless of permission mode.</p>
+<p>The through-line: <strong>the security posture is honest but thin.</strong> Almost every gap
+above is documented in a code comment right next to the gap. That honesty is a
+real strength — but a reader who takes "sandboxed agent" at face value will
+over-trust it.</p>
+<h2>The permission-pipeline gaps</h2><figure><svg viewBox="0 0 860 330" role="img" aria-label="Tool execution pipeline ordering">
+<defs><marker id="a7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker></defs>
+<rect x="10" y="40" width="190" height="70" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="105" y="64" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">model emits arguments</text>
+<text x="105" y="82" text-anchor="middle" fill="#fb923c" font-size="11.5">unvalidated</text>
+<rect x="230" y="40" width="190" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="325" y="64" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">snapshot</text>
+<text x="325" y="82" text-anchor="middle" fill="#94a3b8" font-size="11">lossless JSON,</text>
+<text x="325" y="97" text-anchor="middle" fill="#94a3b8" font-size="11">deep-frozen</text>
+<rect x="450" y="40" width="190" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="545" y="64" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">tools/pre-execute</text>
+<text x="545" y="82" text-anchor="middle" fill="#94a3b8" font-size="11">hooks and matchers</text>
+<text x="545" y="97" text-anchor="middle" fill="#fb923c" font-size="11.5">see raw model output</text>
+<rect x="670" y="40" width="180" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="760" y="64" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">approval</text>
+<text x="760" y="82" text-anchor="middle" fill="#94a3b8" font-size="11">missing service</text>
+<text x="760" y="97" text-anchor="middle" fill="#94a3b8" font-size="11">&#8658; deny</text>
+<rect x="10" y="180" width="190" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="105" y="204" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">guards</text>
+<text x="105" y="222" text-anchor="middle" fill="#94a3b8" font-size="11">deny-only by type —</text>
+<text x="105" y="237" text-anchor="middle" fill="#94a3b8" font-size="11">no &#8220;allow&#8221; return value</text>
+<rect x="230" y="180" width="190" height="70" fill="#0f172a" stroke="#2dd4bf" rx="8"/>
+<text x="325" y="204" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">execute</text>
+<text x="325" y="222" text-anchor="middle" fill="#2dd4bf" font-size="11">arguments validated</text>
+<text x="325" y="237" text-anchor="middle" fill="#2dd4bf" font-size="11">here, inside the body</text>
+<rect x="450" y="180" width="190" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="545" y="204" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">output schema check</text>
+<text x="545" y="222" text-anchor="middle" fill="#94a3b8" font-size="11">result validated against</text>
+<text x="545" y="237" text-anchor="middle" fill="#94a3b8" font-size="11">declared schema</text>
+<rect x="670" y="180" width="180" height="70" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="760" y="204" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">tools/post-execute</text>
+<text x="760" y="222" text-anchor="middle" fill="#94a3b8" font-size="11">observers get a</text>
+<text x="760" y="237" text-anchor="middle" fill="#94a3b8" font-size="11">frozen snapshot</text>
+<line x1="200" y1="75" x2="228" y2="75" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<line x1="420" y1="75" x2="448" y2="75" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<line x1="640" y1="75" x2="668" y2="75" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<path d="M760 110 V145 H105 V178" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<line x1="200" y1="215" x2="228" y2="215" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<line x1="420" y1="215" x2="448" y2="215" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<line x1="640" y1="215" x2="668" y2="215" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a7)"/>
+<text x="430" y="290" text-anchor="middle" fill="#fb923c" font-size="11.5">Every policy stage — pre-execute, approval, guards — runs before validation:</text>
+<text x="430" y="308" text-anchor="middle" fill="#fb923c" font-size="11.5">they all inspect unvalidated model output.</text>
+</svg><figcaption>The pipeline in execution order. Validation lives inside execute — after every policy stage has already inspected the raw arguments.</figcaption></figure>
+<p>Beyond the missing gates, the pipeline itself has ordering and shape problems:</p>
+<ul>
+<li><strong>Arguments reach policy before they are validated.</strong> <code>defineTool</code> validates
+  inside <code>execute</code> (<code>schema.ts:589</code>), which runs <em>after</em> <code>tools/pre-execute</code>,
+  approval, and guards — so every guard and hook matcher inspects unvalidated
+  model output (<code>packages/hooks/hooks-claude-code/src/index.ts:340</code> passes raw
+  <code>exec.arguments</code>).</li>
+<li><strong>Parameter schemas are open by default.</strong> The compiler emits no
+  <code>additionalProperties: false</code> (<code>schema.ts:451-455</code>), so every tool must
+  re-defend by hand; <code>tool-bash</code> does this twice
+  (<code>packages/shell/tool-bash/src/index.ts:214-217</code>, <code>:350-352</code>), and a
+  third-party tool that forgets silently accepts unadvertised parameters.</li>
+<li><strong>A pre-execute listener can short-circuit later ones.</strong> In a composition
+  that loads both hook dialects, a Claude-dialect <code>ask</code> the user approves
+  bypasses the Codex-dialect hook that would have denied
+  (<code>hooks-claude-code/src/index.ts:241-243</code>). The docs claim reorder-proof
+  owner policy "remains a registered guard"
+  (<code>docs/tool-execution-pipeline.md:60</code>), but <strong>no permission policy anywhere
+  uses <code>tools.guard()</code></strong> — the only guard registration in shipped source is a
+  subagent structured-output check
+  (<code>packages/subagent/subagent-in-process-driver/src/structured.ts:109</code>).</li>
+</ul>
+<h2>The extension capabilities, by maturity</h2>
+<ul>
+<li><strong>Subagents</strong> — the most-built subsystem (~8,400 lines). Six providers.
+  In-process providers honor <code>toolFilter</code>/<code>maxDepth</code>/<code>persona</code>/<code>outputSchema</code>;
+  out-of-process ones honor none and fail-closed reject any request needing
+  them (<code>packages/subagent/subagent-acp/src/index.ts:147</code>). So capability
+  restriction is simply unavailable for external-CLI subagent backends.</li>
+<li><strong>Hooks</strong> — two dialects (Claude Code, Codex) over a shared protocol, merged
+  most-restrictive-wins (<code>packages/hooks/hook-protocol/src/merge.ts:35-42</code>).
+  Several holes are self-declared TODOs: no run-level halt
+  (<code>hooks-claude-code/src/index.ts:189</code>), no session-start gating (<code>:205</code>), no
+  stop-loop guard (<code>:269</code>), and config read once at load so one <code>hooks.json</code>
+  applies to every session in the process (<code>:52</code>, <code>:104</code>). <code>updatedInput</code> and
+  <code>systemMessage</code> are parsed then discarded (<code>:176</code>, <code>:179</code>).</li>
+<li><strong>MCP</strong> — thin, opt-in, the lowest-trust surface. 929 lines, stdio +
+  streamable HTTP only. <strong>Not composed by default</strong>, and the CLI README says
+  why (<code>apps/cli/reference/README.md:80</code>: <em>"each server command is trusted
+  executable code outside the agent sandbox"</em>). The tool-poisoning surface is
+  real: MCP <code>description</code> and <code>inputSchema</code> go straight into the model's system
+  prompt with no length bound, no sanitization, and no re-validation on re-sync
+  (<code>packages/mcp/mcp-client/src/tools.ts:146-152</code>), so a server that changes
+  its description between listings silently rewrites the agent's instructions.</li>
+<li><strong>Skills</strong> — a mature loader with no trust boundary. <code>skill-filesystem</code>
+  scans project/user roots and <code>tool-skill</code> returns the full skill body as tool
+  content, but the only recognized frontmatter is two booleans
+  (<code>packages/skill/skill-filesystem/src/index.ts:996-997</code>) — no <code>allowed-tools</code>,
+  no capability scoping, no provenance. A skill file is unconditionally trusted
+  prose injected into context; the only mitigation is that skills are not
+  auto-loaded.</li>
+<li><strong>Workflows</strong> — a worker-thread runner for model-written scripts,
+  explicitly not a security boundary (<code>.../realm.ts:4-6</code>: <em>"the vm is not a
+  security boundary"</em>), with a careful lossless-JSON marshaller at the edge.</li>
+</ul>
+<h2>Things that ship but do not run</h2>
+<p><code>docs/tool-catalog.md</code> presents <code>tool-terminal</code>, <code>tool-lsp</code>,
+<code>tool-bash-persistent</code>, <code>mcp-client</code>, <code>tool-cordis</code>, and <code>e2b</code> as first-class
+tools, but none is in <code>bundle/base</code> or <code>bundle/headless</code>. That is roughly
+7,500 lines of terminal (2,306), LSP (2,486), and e2b (2,659) capability with
+no default composition — and therefore far less real-world exercise of their
+sandbox interactions than bash gets. The largest single unshipped area is
+<code>packages/extensions/</code> (the dynamic-Cordis tool, <code>tool-cordis/src/api-catalog.ts</code>
+alone is 4,751 lines), reachable only in the web-app bundle.</p>
+<h2>The generated docs disagree with the code</h2>
+<p>The four capability/tool docs are generator-produced, and
+<code>docs/capability-seams.md:471</code> even claims a "completeness guard" — yet they
+drift from the code in eight verifiable places. The pattern matters more than
+any single item (see <a href="weaknesses.html">weaknesses.html</a>, theme 2): the gates verify
+that a doc matches its generator's output, not that the generator is correct.</p>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Doc says</th>
+<th>Code says</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ctx.lsp</code> impl <code>lsp-local</code> (<code>capability-seams.md:466</code>)</td>
+<td>no such package; it is <code>dsh-lsp-stdio</code>, and <code>tool-catalog.md:31</code> names it correctly — the two generated docs disagree with each other</td>
+</tr>
+<tr>
+<td><code>ctx.codeRuntime</code> impl <code>code-runtime-worker</code> (<code>:455</code>)</td>
+<td>it is <code>dsh-code-runtime-worker-thread</code></td>
+</tr>
+<tr>
+<td><code>ctx.shell</code> impls omit <code>pwsh-sandbox</code> (<code>:448</code>)</td>
+<td><code>pwsh-sandbox</code> registers <code>ctx.shell</code> and <strong>is the shipped Windows executor</strong></td>
+</tr>
+<tr>
+<td>pwsh "mirrors bash minus sandbox controls" (<code>tool-catalog.md:264</code>)</td>
+<td><code>tool-pwsh</code> registers <code>sandbox_permissions</code>, <code>justification</code>, and calls <code>approveEscalation</code> — straightforwardly false</td>
+</tr>
+<tr>
+<td>rendered bash schema has 5 properties, no escalation fields (<code>tool-catalog.md:178-217</code>)</td>
+<td>the shipped composition mounts <code>bash-sandbox</code>, so the real wire schema carries escalation fields; the catalog renders the <em>unsandboxed</em> variant</td>
+</tr>
+<tr>
+<td>catalog uses <code>sampleOverCapGlobResults: true</code> (<code>tool-catalog.md:27</code>)</td>
+<td>base bundle sets it <code>false</code></td>
+</tr>
+<tr>
+<td>reorder-proof owner policy is a registered guard (<code>tool-execution-pipeline.md:60</code>)</td>
+<td>zero permission policies use <code>tools.guard()</code></td>
+</tr>
+<tr>
+<td><code>ctx.dynamicCordisRunner</code> owns "the vm sandbox" (<code>capability-seams.md:468</code>)</td>
+<td>the implementation refuses the word: <em>"is not containment: host-realm helper functions remain an escape route"</em> (<code>cordis-host-runner/src/sandbox.ts:6-7</code>)</td>
+</tr>
+</tbody>
+</table></div>
+<p>The two claims in <code>docs/defensive-patterns.md</code> we could check — the env scrub
+and the spill-file hardening — are <strong>accurate</strong> and verified in code
+(<code>packages/subprocess/subprocess/src/index.ts:44</code>;
+<code>packages/spill/spill-local/src/store.ts:109-113</code>). The hand-written doc holds;
+the generated ones drift.</p>
+</main>
+</body>
+</html>

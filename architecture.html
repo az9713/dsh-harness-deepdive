@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Architecture — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a class="cur" href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>Architecture: the plugin model, the turn loop, and the session log</h1>
+<h2>"Everything is a plugin" — what it concretely means</h2>
+<p>The claim (<code>docs/architecture.md:11-13</code>: <em>"Every part of the product is a
+plugin, including the model adapter, the tool registry, the session log, and
+the agent loop itself"</em>) rests on three Cordis mechanisms:</p>
+<ol>
+<li><strong>Services claim a <code>ctx.&lt;key&gt;</code> and unregister with their fiber.</strong> A service
+   provides itself into the context tree
+   (<code>vendor/cordis/src/service.ts:57</code>: <code>self.ctx.reflect.provide(name, self, ...)</code>),
+   and harness packages declare their keys through TypeScript declaration
+   merging (<code>packages/core/tools/src/index.ts:137-140</code>:
+   <code>declare module '@deepseek-ai/cordis' { interface Context { tools: ToolRuntime } }</code>).</li>
+<li><strong><code>inject</code> expresses load order as service requirements</strong>, not boot
+   sequencing (<code>packages/core/agent-loop/src/index.ts:297</code>:
+   <code>static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt']</code>).</li>
+<li><strong>Registrations are reversible effects</strong> that unwind when the plugin
+   unloads (<code>packages/core/agent-loop/src/index.ts:349-350</code>:
+   <code>ctx.effect(() =&gt; ctx.agents.setFactory(this), ...)</code>).</li>
+</ol>
+<p>The claim is real, not aspirational. The agent loop is literally a row in a
+YAML file (<code>packages/bundle/base/cordis.patch.yml:436-437</code>), and the loop
+<em>interface</em> (<code>dsh-agent</code>) is a separate package from the <em>driver</em>
+(<code>dsh-agent-loop</code>), connected by a swappable factory
+(<code>packages/core/agent/src/index.ts:372-379</code>). You could mount a different
+agent loop from configuration.</p>
+<p><strong>The tradeoff:</strong> everything-is-a-plugin means everything-is-composition.
+Understanding what a given <code>dsh web</code> process contains requires mentally
+merging four YAML patch layers plus platform-conditional <code>disabled: !!js</code>
+expressions. Upstream knows this — their own postmortem 0002 documents the
+filesystem tools being silently disabled for a while because a <code>!!js</code>
+expression appeared in a field the loader does not interpolate
+(<code>docs/postmortem/0002-js-expression-disabled-filesystem-tools.md:9</code>, <code>:32</code>).
+Composition errors are configuration-shaped, invisible to the type system, and
+they fail silently unless a gate catches them.</p>
+<h2>Scopes: how one agent gets its own world</h2>
+<p><code>dsh-scope</code> (~200 lines) tags a Cordis context with an opaque key.
+Registrations inherit <em>down</em> the scope chain; events flow <em>up</em> it
+(<code>packages/core/scope/src/index.ts:172-181</code>). Each agent mints one scope and
+extends it with itself (<code>packages/core/agent-loop/src/agent.ts:94-95</code>). This
+single small primitive is what makes per-session tool sets, per-session prompt
+sections, and per-session listeners possible — it is the mechanism behind the
+web surface's per-session agent presets.</p>
+<p>A fragility to know about: scope bookkeeping lives in module-level
+<code>WeakMap</code>s (<code>packages/core/scope/src/index.ts:30,39</code>). If two copies of
+<code>dsh-scope</code> ever load in one process, scoping silently splits — which is
+exactly the duplicate-instance hazard the boot symlink farm exists to prevent
+(<code>packages/boot/app-boot/src/profile.ts:133-137</code>).</p>
+<h2>The session log is the single source of truth — and it is enforced</h2><figure><svg viewBox="0 0 860 300" role="img" aria-label="Session log invariant">
+<defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker><marker id="a4o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fb923c"/></marker></defs>
+<rect x="20" y="30" width="230" height="110" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="135" y="54" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">durable events</text>
+<text x="135" y="76" text-anchor="middle" fill="#94a3b8" font-size="11">agent/inbox/spliced · turn/start</text>
+<text x="135" y="92" text-anchor="middle" fill="#94a3b8" font-size="11">step/start · stream chunks</text>
+<text x="135" y="108" text-anchor="middle" fill="#94a3b8" font-size="11">tool/call · turn/end</text>
+<rect x="310" y="30" width="170" height="110" fill="#0f172a" stroke="#2dd4bf" rx="8"/>
+<text x="395" y="60" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">session log</text>
+<text x="395" y="82" text-anchor="middle" fill="#2dd4bf" font-size="11">append-only,</text>
+<text x="395" y="98" text-anchor="middle" fill="#2dd4bf" font-size="11">replayed on construction</text>
+<rect x="540" y="30" width="300" height="60" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="690" y="54" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">LLM request = deriveMessages()</text>
+<text x="690" y="74" text-anchor="middle" fill="#94a3b8" font-size="11">derived at dispatch time, never accumulated</text>
+<rect x="540" y="120" width="300" height="76" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="690" y="144" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">runtime invariant (prepend: true)</text>
+<text x="690" y="162" text-anchor="middle" fill="#94a3b8" font-size="11">re-derives from the log at every dispatch;</text>
+<text x="690" y="178" text-anchor="middle" fill="#fb923c" font-size="11.5">divergence &#8658; the run fails</text>
+<line x1="250" y1="85" x2="308" y2="85" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a4)"/>
+<text x="279" y="78" text-anchor="middle" fill="#94a3b8" font-size="11">append</text>
+<line x1="480" y1="60" x2="538" y2="60" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a4)"/>
+<path d="M480 110 H510 V158 H538" stroke="#fb923c" stroke-width="1.5" fill="none" marker-end="url(#a4o)"/>
+<line x1="690" y1="90" x2="690" y2="118" stroke="#fb923c" stroke-width="1.5" marker-end="url(#a4o)"/>
+<text x="700" y="110" fill="#fb923c" font-size="11.5">compare</text>
+<rect x="20" y="220" width="460" height="50" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="250" y="242" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">replay · resume · UI rendering</text>
+<text x="250" y="260" text-anchor="middle" fill="#94a3b8" font-size="11">all read the same substrate</text>
+<line x1="395" y1="140" x2="395" y2="218" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a4)"/>
+<text x="20" y="292" fill="#94a3b8" font-size="11">Caveat: comparison is JSON.stringify — key-order-sensitive, so a benign reorder is a false failure.</text>
+</svg><figcaption>Requests are derived from the log, and a test-mounted invariant makes drift a hard failure instead of a heisenbug.</figcaption></figure>
+<p>Every model-visible thing is a durable event in an append-only session log.
+The inbox is not in-memory state; every mutation is an <code>agent/inbox/spliced</code>
+event, and the in-memory projection is replayed from the log on construction
+(<code>packages/core/agent/src/inbox.ts:186</code>, <code>:32-35</code>). LLM request messages are
+never accumulated in variables; they are derived from the log at dispatch time
+(<code>packages/core/agent-loop/src/agent.ts:341</code>:
+<code>this.session.deriveMessages()</code>), with an incremental cached fold invalidated
+by compaction (<code>packages/core/session/src/index.ts:730-733</code>).</p>
+<p>The remarkable part is that this is <strong>machine-checked at runtime</strong>, not just
+documented. A test-mounted invariant re-derives the messages from the log at
+every LLM dispatch and fails the run if they diverge
+(<code>packages/core/agent-loop/src/invariant.ts:39-42</code>):</p>
+<pre><code class="language-ts">const expected = session.deriveMessages()
+if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
+  fail(`llm request ... diverges from the dispatch-time durable derivation (log-reconstruction desync)`)
+}
+</code></pre>
+<p>It registers with <code>prepend: true</code> so a replay listener cannot silence it
+(<code>invariant.ts:20-21</code>). This is the single best design decision in the
+codebase: replay, resume, and UI rendering all read the same substrate, and
+drift between "what the model saw" and "what the log says" is a hard failure
+instead of a heisenbug.</p>
+<p>Two caveats. The invariant compares by <code>JSON.stringify</code>, which is
+key-order-sensitive — a benign object-construction reorder produces a false
+failure (<code>invariant.ts:40</code>, <code>:48-49</code>). And persistence refuses old formats
+rather than migrating them (<code>packages/session/session-persistence/src/coordinator.ts:278</code>
+throws on legacy events; <code>SESSION_FORMAT_VERSION = 0</code>,
+<code>docs/persistence-catalog.md:10</code>) — correct for a pre-release, but it means
+stored sessions have no future.</p>
+<h2>The turn loop, end to end</h2><figure><svg viewBox="0 0 860 660" role="img" aria-label="The turn loop end to end">
+<defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker><marker id="a3t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2dd4bf"/></marker></defs>
+<rect x="620" y="30" width="220" height="500" fill="#0f172a" stroke="#2dd4bf" rx="8"/>
+<text x="730" y="56" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">session log</text>
+<text x="730" y="76" text-anchor="middle" fill="#2dd4bf" font-size="11">append-only JSONL —</text>
+<text x="730" y="92" text-anchor="middle" fill="#2dd4bf" font-size="11">the single source of truth</text>
+<rect x="20" y="30" width="520" height="52" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="52" fill="#e2e8f0" font-size="13" font-weight="600">1 · Prompt arrives</text>
+<text x="34" y="70" fill="#94a3b8" font-size="11">followup / steer / inject — one inbox, three targets</text>
+<rect x="20" y="102" width="520" height="40" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="127" fill="#e2e8f0" font-size="13" font-weight="600">2 · turn/start appended — durable before input is claimed</text>
+<rect x="20" y="162" width="520" height="68" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="184" fill="#e2e8f0" font-size="13" font-weight="600">3 · Step preparation (before step/start)</text>
+<text x="34" y="202" fill="#94a3b8" font-size="11">claim inbox · assemble system prompt + tool schemas</text>
+<text x="34" y="218" fill="#94a3b8" font-size="11">agent/pre-step waterfall — 13 listener packages; compaction here</text>
+<rect x="20" y="250" width="520" height="84" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="272" fill="#e2e8f0" font-size="13" font-weight="600">4 · Step executes</text>
+<text x="34" y="290" fill="#94a3b8" font-size="11">step/start + claimed user/message appended</text>
+<text x="34" y="306" fill="#94a3b8" font-size="11">agent/request &#8594; llm/stream &#8594; adapter</text>
+<text x="34" y="322" fill="#94a3b8" font-size="11">every stream chunk appended durably before assembly</text>
+<path d="M20 322 H10 V268 H18" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)" stroke-dasharray="4 3"/>
+<text x="24" y="360" fill="#fb923c" font-size="11.5">agent/request-error &#8594; retry loops the same step</text>
+<text x="24" y="378" fill="#fb923c" font-size="11.5">&#8212; while (true), no ceiling in core</text>
+<rect x="20" y="406" width="520" height="84" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="428" fill="#e2e8f0" font-size="13" font-weight="600">5 · Tool calls execute</text>
+<text x="34" y="446" fill="#94a3b8" font-size="11">exclusive-or-parallel, fail-closed · tool/call logged first</text>
+<text x="34" y="462" fill="#94a3b8" font-size="11">tools/pre-execute &#8594; tools/execute &#8594; tools/post-execute</text>
+<text x="34" y="478" fill="#94a3b8" font-size="11">results commit in model order · tool output &#8594; next-step inbox</text>
+<rect x="20" y="510" width="520" height="40" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="34" y="535" fill="#e2e8f0" font-size="13" font-weight="600">6 · agent/turn-stopping &#8594; turn/end (reason)</text>
+<line x1="280" y1="82" x2="280" y2="100" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<line x1="280" y1="142" x2="280" y2="160" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<line x1="280" y1="230" x2="280" y2="248" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<line x1="280" y1="334" x2="280" y2="404" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<line x1="280" y1="490" x2="280" y2="508" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<line x1="540" y1="122" x2="618" y2="122" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#a3t)"/>
+<line x1="540" y1="292" x2="618" y2="292" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#a3t)"/>
+<line x1="540" y1="448" x2="618" y2="448" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#a3t)"/>
+<line x1="540" y1="530" x2="618" y2="530" stroke="#2dd4bf" stroke-width="1.5" marker-end="url(#a3t)"/>
+<rect x="620" y="580" width="220" height="60" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="730" y="605" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">7 · UI</text>
+<text x="730" y="623" text-anchor="middle" fill="#94a3b8" font-size="11">session/event wire frames</text>
+<line x1="730" y1="530" x2="730" y2="578" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a3)"/>
+<text x="726" y="560" text-anchor="end" fill="#94a3b8" font-size="11">every append broadcast</text>
+<text x="20" y="590" fill="#fb923c" font-size="11.5">Caveat: the driver swallows every failure at its boundary —</text>
+<text x="20" y="608" fill="#fb923c" font-size="11.5">error goes to agent/error + turn/end.reason, but no logger call;</text>
+<text x="20" y="626" fill="#fb923c" font-size="11.5">with no listener mounted, a failed turn is invisible.</text>
+</svg><figcaption>One turn, end to end. Prompt assembly happens in step preparation, before step/start is appended. Teal arrows are durable appends.</figcaption></figure>
+<p>What happens between a user message and a response, with the real file:line
+trail:</p>
+<ol>
+<li><strong>Prompt arrives.</strong> The web <code>prompt</code> RPC builds a durable <code>UserMessage</code> and
+   calls <code>agent.followup(...)</code> or <code>agent.steer(...)</code>
+   (<code>packages/host/apiproxy/src/api-proxy.ts:2497</code>). <code>followup</code>, <code>steer</code>, and
+   <code>inject</code> are one inbox with three targets — next-turn vs next-step, wake vs
+   not (<code>packages/core/agent-loop/src/agent.ts:122</code>).</li>
+<li><strong>Turn opens durably before input is claimed</strong>
+   (<code>agent.ts:255</code>: <code>this.session.append('turn/start', { turn })</code>).</li>
+<li><strong>Step preparation.</strong> Claim inbox messages, assemble the system prompt and
+   tool schemas, then run the <code>agent/pre-step</code> waterfall (<code>agent.ts:229-239</code>).
+   Thirteen packages listen here (<code>docs/event-producer-consumer.md:20</code>) — this
+   is the main policy seam, and it is where compaction applies pressure
+   (<code>packages/compaction/compaction-basic/src/index.ts:153</code>). A synthetic
+   runtime-context message (time, cwd, instructions) is appended only when it
+   differs from the last snapshot
+   (<code>packages/core/agent-loop/src/runtime-context.ts:64-67</code>).</li>
+<li><strong>Step executes.</strong> <code>step/start</code> and each claimed <code>user/message</code> are
+   appended (<code>agent.ts:279-283</code>); request config passes the <code>agent/request</code>
+   waterfall (<code>agent.ts:438</code>); the call dispatches through
+   <code>LlmRuntime.stream</code> → the <code>llm/stream</code> waterfall → the adapter
+   (<code>packages/llm/llm/src/index.ts:921-926</code>). <strong>Every stream chunk is appended
+   durably before assembly</strong> (<code>agent.ts:349-350</code>), so a crash mid-stream loses
+   nothing. Failures re-enter through the <code>agent/request-error</code> waterfall;
+   <code>retry</code> loops the same step (<code>agent.ts:355-370</code>).</li>
+<li><strong>Tool calls execute.</strong> Calls are classified exclusive-or-parallel with a
+   fail-closed default (<code>packages/core/tools/src/index.ts:1278-1284</code>: unknown
+   or throwing classifier means exclusive). <code>tool/call</code> is logged before the
+   pipeline runs (<code>packages/core/agent-loop/src/tool-calls.ts:167-169</code>); the
+   three documented waterfalls fire in order — <code>tools/pre-execute</code> (<code>tools/src/index.ts:1475</code>),
+   <code>tools/execute</code> (<code>:1573</code>), <code>tools/post-execute</code> (<code>:1744</code>) — and results
+   commit in model order even though dispatch overlaps
+   (<code>tool-calls.ts:146-158</code>). Tool-produced context is staged into the
+   next-step inbox rather than concatenated into the request (<code>agent.ts:397</code>).</li>
+<li><strong>Turn closes.</strong> <code>agent/turn-stopping</code> runs serially when the inbox is
+   empty, then <code>turn/end</code> with a reason (<code>agent.ts:295-299</code>, <code>:319</code>).</li>
+<li><strong>The UI hears about it.</strong> Every append is broadcast synchronously and
+   converted to a <code>session/event</code> wire frame
+   (<code>packages/host/apiproxy/src/api-proxy.ts:3493</code>).</li>
+</ol>
+<h3>The loop's rough edges</h3>
+<ul>
+<li><strong>The driver swallows every failure at its boundary</strong>
+  (<code>agent.ts:212-215</code>: <code>catch (_error) { /* contained */ }</code>). The error is
+  emitted on <code>agent/error</code> first (<code>:206</code>) and recorded in <code>turn/end.reason</code>
+  (<code>:309-314</code>), but if no listener is mounted and nobody reads the log, a turn
+  can fail with zero operator-visible output — there is no logger call on this
+  path.</li>
+<li><strong>The step retry loop is unbounded in core</strong> (<code>agent.ts:339</code> <code>while (true)</code>,
+  exit only when a listener declines to retry). All bounding lives in
+  listeners (<code>packages/llm/llm-retry/src/index.ts:190</code>,
+  <code>packages/compaction/compaction-basic/src/index.ts:189</code>); a third-party
+  <code>agent/request-error</code> listener that always returns <code>{kind:'retry'}</code> spins
+  forever, and <code>llm-retry</code>'s <code>mode: 'always'</code> is unbounded by design.</li>
+<li><strong>A non-null assertion guards the durable log's integrity</strong>
+  (<code>agent.ts:318-319</code>: <code>turn/end { reason: turnEnds! }</code>) — a future exit path
+  that misses the assignment writes <code>reason: undefined</code> into the log instead
+  of failing.</li>
+<li><strong>Invalid tool-call JSON degrades silently to a raw string</strong>
+  (<code>tool-calls.ts:104-110</code>: <code>catch { return raw }</code>), so the failure surfaces
+  later as a schema violation instead of at the parse site.</li>
+</ul>
+<h2>Host vs client split</h2><figure><svg viewBox="0 0 860 300" role="img" aria-label="The one dependency cycle">
+<defs><marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker><marker id="a5o" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#fb923c"/></marker></defs>
+<rect x="60" y="40" width="290" height="60" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="205" y="65" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">dsh-api-gateway</text>
+<text x="205" y="85" text-anchor="middle" fill="#94a3b8" font-size="11">packages/api</text>
+<rect x="510" y="40" width="290" height="60" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="655" y="65" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">dsh-api-remotes</text>
+<text x="655" y="85" text-anchor="middle" fill="#94a3b8" font-size="11">packages/api</text>
+<rect x="60" y="180" width="290" height="60" fill="#0f172a" stroke="#2dd4bf" rx="8"/>
+<text x="205" y="205" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">dsh-client-connection</text>
+<text x="205" y="225" text-anchor="middle" fill="#2dd4bf" font-size="11">client half</text>
+<rect x="510" y="180" width="290" height="60" fill="#0f172a" stroke="#fb923c" rx="8"/>
+<text x="655" y="205" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">dsh-host-apiproxy</text>
+<text x="655" y="225" text-anchor="middle" fill="#fb923c" font-size="11.5">host half — 3,744-line god file</text>
+<line x1="205" y1="100" x2="205" y2="178" stroke="#64748b" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#a5)"/>
+<text x="215" y="145" fill="#94a3b8" font-size="11">type-only</text>
+<line x1="350" y1="212" x2="508" y2="212" stroke="#fb923c" stroke-width="2.5" marker-end="url(#a5o)"/>
+<text x="429" y="202" text-anchor="middle" fill="#fb923c" font-size="11.5">value import: toFetchHandler</text>
+<text x="429" y="236" text-anchor="middle" fill="#fb923c" font-size="11.5">client depending on host</text>
+<line x1="655" y1="178" x2="655" y2="102" stroke="#64748b" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#a5)"/>
+<text x="665" y="145" fill="#94a3b8" font-size="11">type-only</text>
+<line x1="508" y1="70" x2="352" y2="70" stroke="#64748b" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#a5)"/>
+<text x="430" y="62" text-anchor="middle" fill="#94a3b8" font-size="11">type-only</text>
+</svg><figcaption>The one manifest-level dependency cycle in the workspace, and it crosses the host/client line. Three edges are type-only; the orange one is a real value import. docs/module-graph.md hides it by drawing only peer-dependency edges.</figcaption></figure>
+<p>The host half (<code>packages/host/*</code>) owns a transport-independent API proxy plus
+a plain HTTP server (<code>packages/host/README.md:16</code>); the client half
+(<code>packages/client/*</code>) is a three-layer stack with declared one-way knowledge —
+React-free data objects, shell-only render glue, pure-props presentation
+components (<code>packages/client/AGENTS.md:46-48</code>). The split is enforced
+structurally: two disjoint TypeScript programs whose Context merges never meet
+(<code>tsconfig.json:6</code>).</p>
+<p>Two blemishes. First, <code>packages/host/apiproxy/src/api-proxy.ts</code> is a
+<strong>3,744-line god file</strong> holding the entire host API surface — bigger than
+<code>core/agent-loop</code> + <code>core/agent</code> + <code>core/scope</code> combined (2,841 lines).
+<code>packages/core/tools/src/index.ts</code> is the other god file at 1,946 lines.
+Second, there is exactly one manifest-level dependency cycle in the workspace,
+and it crosses the host/client line:
+<code>dsh-api-gateway → dsh-client-connection → dsh-host-apiproxy →
+dsh-api-remotes → dsh-api-gateway</code> (edges at
+<code>packages/api/gateway/package.json:62</code>,
+<code>packages/client/connection/package.json:42</code>,
+<code>packages/host/apiproxy/package.json:51</code>,
+<code>packages/api/remotes/package.json:63</code>). Three of the four edges are type-only,
+but <code>client-connection → host-apiproxy</code> is a value import
+(<code>packages/client/connection/src/index.ts:7</code>:
+<code>import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'</code>) — a client
+package depending on a host package, which is the layering smell the split's
+own framing denies. The generated <code>docs/module-graph.md</code> hides this because it
+only draws peer-dependency edges (<code>docs/module-graph.md:6</code>), omitting six real
+<code>dependencies</code> on <code>client-connection</code> alone
+(<code>packages/client/connection/package.json:40-47</code>).</p>
+<h2>The vendored framework</h2>
+<p>Cordis is not consumed; it is <strong>owned</strong>. Nine framework packages live in
+<code>vendor/</code>, renamed to the <code>@deepseek-ai</code> scope for registry hygiene
+(<code>docs/rescope.md:5</code> — note this doc is a namespace rename, not a product
+pivot), with a maintained ledger of <strong>18 local modifications</strong>, each with
+rationale and a covering test (<code>vendor/README.md:29-51</code>). Several are deep
+behavioral rewrites (fiber-lifecycle hardening, transactional loader
+reconciliation), and half the vendored set already comes from DeepSeek's own
+fork of the upstream (<code>vendor/README.md:17-23</code> cites both
+<code>cordiverse/cordis</code> and <code>deepseek-harness/cordis</code> as sources). This is a fork
+that will never go back.</p>
+<p>The oddest artifact of ownership: vendored Cordis's <code>emit</code> starves later
+listeners when one throws synchronously and discards returned promise
+rejections (<code>vendor/cordis/src/events.ts:194-196</code>), and instead of fixing it
+in the framework they control, harness code hand-rolls the same containment
+workaround <strong>five times</strong> (<code>packages/core/agent/src/dispatch.ts:125-136</code>,
+<code>packages/core/agent/src/index.ts:529-539</code> and <code>:561-571</code>,
+<code>packages/core/agent-loop/src/index.ts:393-403</code>,
+<code>packages/core/session/src/index.ts:382-397</code>). The duplication detector
+misses it because the identifiers differ.</p>
+<h2>Boot</h2>
+<p><code>app-boot</code> loads <code>.env</code> (refusing entries that try to set process/network
+bootstrap variables — <code>packages/boot/app-boot/src/index.ts:157-160</code>), resolves
+the profile, applies patch layers, and drives the loader to settlement,
+failing loudly if any plugin cannot resolve (<code>index.ts:662</code>). The design is
+sound; the wart is the write-on-every-boot behavior described in
+<a href="what-is-dsh.html">what-is-dsh.html</a>.</p>
+</main>
+</body>
+</html>

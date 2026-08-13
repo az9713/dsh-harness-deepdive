@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Strengths — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a class="cur" href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>Strengths, ranked</h1>
+<p>The best of this codebase, ordered by how much a reader should want to steal it.</p>
+<h2>1. The session log as an enforced single source of truth</h2>
+<p>Every model-visible fact is a durable event; LLM requests are re-derived from
+the log, never accumulated; and a runtime invariant fails the process if the
+two ever diverge (<code>packages/core/agent-loop/src/invariant.ts:39-42</code>, registered
+<code>prepend: true</code> so replay cannot silence it). Replay, resume, and UI rendering
+all read one substrate. This is the design decision most worth copying — it
+converts an entire class of "the UI shows something different from what the
+model saw" heisenbugs into a hard, immediate failure.</p>
+<h2>2. Fail-closed as a house style, actually implemented</h2>
+<p>Not a slogan. Missing approval service denies
+(<code>packages/core/tools/src/index.ts:1694-1699</code>); an unavailable sandbox runner
+means the command never runs (<code>packages/sandbox/sandbox-local/src/index.ts:494</code>);
+an unknown or throwing concurrency classifier defaults to exclusive
+(<code>packages/core/tools/src/index.ts:1278-1284</code>); a rogue approval answerer is
+normalized to <code>unavailable</code> (<code>packages/interaction/user-approval/src/index.ts:325</code>).
+The safe direction is the default direction throughout.</p>
+<h2>3. Honest self-labeling of what is not a boundary</h2>
+<p>Repeatedly, code comments refuse to overclaim: the fs fence is <em>"a policy check
+in TRUSTED code ... NOT a kernel boundary"</em>
+(<code>packages/fs/fs-sandbox/src/index.ts:11-18</code>); the workflow VM <em>"is not a
+security boundary"</em> (<code>.../realm.ts:4-6</code>); the dynamic-Cordis runner <em>"is not
+containment: host-realm helper functions remain an escape route"</em>
+(<code>packages/extensions/cordis-host-runner/src/sandbox.ts:6-7</code>); the code runtime
+is <em>"containment, not a security boundary"</em>. This candor is rare and is worth
+more than a stronger-sounding but dishonest claim.</p>
+<h2>4. Single-sourced security predicates</h2>
+<p>The Code-Mode collapse rule the prompt tells the model is the exact function
+the executor denies by (<code>packages/core/tools/src/index.ts:861</code> feeds the
+prompt; <code>:1325</code> gates execution). The model can never be told a rule the
+executor does not enforce — a pattern any prompt-plus-policy system should
+adopt.</p>
+<h2>5. Monotonic guards by type, not convention</h2>
+<p>A <code>ToolGuard</code> returns a deny reason or <code>undefined</code> — there is no "allow" return
+value (<code>packages/core/tools/src/index.ts:711</code>). Registration order therefore
+cannot resurrect a denied call. Making the safety property a type property
+instead of a discipline is the right move.</p>
+<h2>6. The plugin model delivers on its promise</h2>
+<p>"Everything is a plugin" is verifiable: the agent loop is a config row
+(<code>packages/bundle/base/cordis.patch.yml:436-437</code>), the loop interface and its
+driver are separable packages joined by a swappable factory
+(<code>packages/core/agent/src/index.ts:372-379</code>), and per-agent scopes
+(<code>packages/core/scope/src/index.ts</code>) genuinely give one session a different
+capability set. This is real composability, not a DI-container veneer.</p>
+<h2>7. Release verification that actually verifies</h2>
+<p>Per-package publish decisions by registry tarball integrity — differing bytes
+<em>fail the run</em> (<code>scripts/release/publish.ts:5-8</code>) — plus installing every
+tarball into a clean external consumer and driving the bin before release
+(<code>scripts/release/verify-packed-install.ts:14-17</code>). Exactly one dependency
+patch across 221 packages (<code>pnpm-workspace.yaml:71-72</code>). Most monorepos this
+size are a swamp of patched dependencies; this one is not.</p>
+<h2>8. Cancellation and teardown treated as designed contracts</h2>
+<p>Tool bodies are never abandoned; the caller signal is re-fused over any wrapper
+replacement (<code>packages/core/tools/src/index.ts:1536-1544</code>); aborted-unstarted
+calls still get durable synthetic results so replay stays valid
+(<code>packages/core/agent-loop/src/tool-calls.ts:251-258</code>); the agent disposer is
+registered before any resource exists and is memoized
+(<code>packages/core/agent-loop/src/index.ts:497-499</code>). Lifecycle is engineered, not
+bolted on.</p>
+<h2>9. Test infrastructure that resists cheating</h2>
+<p>216 of 219 packages have tests; a scriptable OpenAI-compatible mock server and
+a session-replay harness under <code>packages/test-support/</code>; and an explicit
+anti-cheat rule that an e2e assertion must re-run the command or re-read the
+file externally rather than probing the agent's own output
+(<code>docs/testing.md:29</code>). The philosophy — mock only the expensive,
+non-deterministic boundary and keep everything downstream real — is correct.</p>
+<h2>10. Institutionalized wart-admission</h2>
+<p>220 of 268 package READMEs carry a gate-enforced
+<code>## Known Limitations and Deferred Work</code> section, and the four postmortems
+exist to record <em>why the process failed</em>, not just the fix. A codebase that
+forces itself to write down its own gaps is one you can trust to have found
+more of them than it hides. This review's own material came substantially from
+the project's own honest self-documentation.</p>
+<h2>Worth a special mention: the postmortems</h2>
+<p>PM 0001's lesson — <em>"Coverage proves lines ran; it says nothing about whether
+the feature works the way it ships"</em> (<code>docs/postmortem/0001-...:98</code>) — is the
+single most valuable sentence in the repository, and they earned it by shipping
+a completely non-functional ACP bridge behind 178 green tests and 100%
+coverage. PM 0003, where their own web agent fooled itself three times about
+which server it was validating, is a candid record of agent-driven development's
+failure mode from the people best positioned to see it.</p>
+</main>
+</body>
+</html>

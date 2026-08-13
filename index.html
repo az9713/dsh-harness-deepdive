@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Index — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a class="cur" href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>deepseek-harness: an independent review</h1>
+<p><em>Written 2026-08-13 against upstream HEAD <code>47f943859b</code> (v0.1.0-rc.5). This is a
+study clone; all commits stay local. Every claim below carries a <code>file:line</code>
+reference and, where it matters, a quoted snippet — verify against current code
+before relying on any of it, because upstream promises breaking changes.</em></p>
+<h2>What this review is</h2>
+<p>A from-scratch, warts-and-all audit of DeepSeek's agent harness (<code>dsh</code>). Three
+goals: demystify how the thing actually works, explain the designs and why they
+are shaped that way, and surface every strength and weakness the evidence
+supports. It was produced by six parallel code audits (core runtime, capability
+surface, surfaces/distribution, process/quality, upstream's own docs, and the
+<code>.agents/</code> tree), then synthesized by hand. It replaces an earlier review that
+was discarded without being consulted.</p>
+<h2>The headline</h2>
+<p>The most interesting fact about this repository is not the product. It is how
+the product is built. The repo is <strong>64 days old</strong> (first commit 2026-06-10,
+"Initialize repo with README, AGENTS.md, and CLAUDE.md symlink"). In those 64
+days: <strong>12,294 commits, ~2,500 internal PRs (~39 per day), ~20 human
+contributors</strong> — with 203 <code>codex/*</code> and 306 <code>worktree/*</code> branch merges, a
+standing rule that every non-trivial change must ship an "Agent Note" decision
+record in the same PR (<code>AGENTS.md:122</code>), and an in-repo skill whose whole job
+is scrubbing their own model's chain-of-thought leakage out of committed prose
+(<code>.agents/skills/dsh-trim-cot-leakage/SKILL.md</code>). dsh is as much a
+demonstration of large-scale agent-driven software development as it is an
+agent harness. Reading it teaches you two things at once: how they designed a
+harness, and how a small team runs a 219-package monorepo at 39 PRs/day with
+agents doing most of the typing.</p>
+<h2>One-screen verdict</h2>
+<ul>
+<li><strong>The architecture claim is real.</strong> "Everything is a plugin" is not
+  marketing: the agent loop itself is a config row
+  (<code>packages/bundle/base/cordis.patch.yml:436-437</code>), and the session event log
+  is a genuine single source of truth with a test-mounted invariant that fails
+  the run if an LLM request ever diverges from the log-derived state
+  (<code>packages/core/agent-loop/src/invariant.ts:39-42</code>, mounted via
+  <code>vitest.config.ts:120</code>).</li>
+<li><strong>The security model is one boundary doing all the work.</strong> A kernel-level
+  file sandbox (bwrap/Landlock/Seatbelt/Windows-ACL) is the only real
+  enforcement. There is no command-level permission gate on the shell tool
+  (the code says so itself: <code>packages/shell/tool-bash/src/index.ts:6</code>), no
+  authentication on the web surface (loopback-only by construction instead),
+  and <code>run_code</code> executes outside the sandbox entirely. The code is unusually
+  honest about all of this.</li>
+<li><strong>The process machinery is world-class and has a blind spot.</strong> ~30
+  documentation gates, 100%-per-file coverage thresholds, publish verification
+  that installs every tarball into a clean consumer. Yet the doc-drift we found
+  clusters <em>inside</em> generated and gated docs: the gates verify
+  freshness-of-generation, not truth-of-generator.</li>
+<li><strong>It is a developer preview and behaves like one.</strong> Eight release commits in
+  one day, a version line reset mid-flight, a <code>tui</code> profile advertised in
+  <code>--help</code> that does not exist in the box, and a formal statement that no
+  compatibility is promised (<code>AGENTS.md:7</code>, <code>SESSION_FORMAT_VERSION = 0</code>).</li>
+</ul>
+<h2>How to read this review</h2>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>File</th>
+<th>What it answers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="what-is-dsh.html">what-is-dsh.html</a></td>
+<td>What is this, what actually ships, what happens when you run <code>dsh web</code>, where state lives on disk.</td>
+</tr>
+<tr>
+<td><a href="architecture.html">architecture.html</a></td>
+<td>The plugin model, the turn loop end to end, the session log, scopes, host/client split — and the tradeoffs of each.</td>
+</tr>
+<tr>
+<td><a href="capabilities-and-security.html">capabilities-and-security.html</a></td>
+<td>Tools, seams, the sandbox, permissions — what is enforced and what is advisory. MCP, skills, subagents, hooks, workflows.</td>
+</tr>
+<tr>
+<td><a href="how-they-build-it.html">how-they-build-it.html</a></td>
+<td>Velocity, agent-driven development, the <code>.agents/</code> tree, Agent Notes, the bilingual doc pipeline, testing, CI, releases.</td>
+</tr>
+<tr>
+<td><a href="strengths.html">strengths.html</a></td>
+<td>The ranked list of things worth stealing.</td>
+</tr>
+<tr>
+<td><a href="weaknesses.html">weaknesses.html</a></td>
+<td>The ranked list of warts, each with evidence.</td>
+</tr>
+<tr>
+<td><a href="verdict.html">verdict.html</a></td>
+<td>Adopt or not; what to copy; open risks.</td>
+</tr>
+</tbody>
+</table></div>
+<h2>Number conventions used throughout</h2>
+<ul>
+<li>Upstream HEAD is <code>47f943859b</code> (2026-08-13); the study clone adds local
+  commits on top.</li>
+<li>"219 packages" means directories matching <code>packages/*/*</code>. The npm publish
+  family ("dsh") is 221 (those plus <code>apps/cli</code> and <code>apps/web</code>). Workspace-root
+  counts (for example in dependency-cycle analysis) are 74.</li>
+<li><code>.agents/</code> counts: <strong>686 English source documents</strong>, which the bilingual
+  pipeline expands to 2,078 tracked files (each note is an English <code>.md</code>, a
+  Chinese <code>.zh.md</code>, and a hash-record <code>.i18n.yaml</code>).</li>
+</ul>
+</main>
+</body>
+</html>

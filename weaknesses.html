@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Weaknesses — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a class="cur" href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>Weaknesses, ranked</h1>
+<p>Warts, ordered by how much they should affect a decision to adopt or trust. Two
+recurring <em>themes</em> organize most of the individual findings; they come first.</p>
+<h2>Theme A: one security boundary carries the whole load</h2>
+<p>The single most important thing to understand before trusting dsh as a sandbox:
+there is exactly one real enforcement boundary — the kernel file/process
+sandbox — and several capabilities live outside it. Consolidated from
+<a href="capabilities-and-security.html">capabilities-and-security.html</a>:</p>
+<ul>
+<li><strong>No command-level gate on the shell.</strong> The model runs any command with no
+  prompt under the default mode, as long as file writes stay in the workspace;
+  the sandbox does not cover the network at all
+  (<code>packages/shell/tool-bash/src/index.ts:6</code> TODO;
+  <code>packages/sandbox/sandbox/src/index.ts:26-27</code>).</li>
+<li><strong><code>run_code</code> runs outside the file sandbox</strong> — a worker thread with the full
+  Node API reachable (<code>packages/code-runtime/code-runtime-worker-thread/src/index.ts:378-387</code>).</li>
+<li><strong>No authentication on the web surface</strong> — loopback-only by construction is
+  the entire model (<code>packages/client/connection/src/api-request-trust.ts:12-13</code>).</li>
+<li><strong>The approval channel is absent in headless</strong>, so every escalation
+  deterministically denies there (only ACP and web mount an answerer).</li>
+<li><strong>One env var opens everything</strong> — <code>DSH_PERMISSION_MODE=danger-full-access</code>
+  removes the sandbox and the prompts together
+  (<code>packages/shell/bash-sandbox/src/index.ts:91-93</code>).</li>
+</ul>
+<p>None of this is hidden — every gap is documented in a nearby code comment. But
+a reader who takes "sandboxed agent" at face value will substantially
+over-trust the system. Treat dsh's confinement as "keeps file writes in the
+workspace on a trusted machine", not "safe to point at hostile input".</p>
+<h2>Theme B: the gates verify freshness-of-generation, not truth-of-generator</h2>
+<p>dsh has the most elaborate doc-and-quality machinery we have seen in a
+production repo — and the drift we found clusters precisely inside the
+<em>generated and gated</em> artifacts, because a freshness gate proves a document
+matches its generator's output, never that the generator is right:</p>
+<ul>
+<li><strong>The four capability/tool docs drift from code in eight places</strong>
+  (table in <a href="capabilities-and-security.html">capabilities-and-security.html</a>),
+  including two generated docs that disagree with <em>each other</em> about the LSP
+  package name — despite <code>docs/capability-seams.md:471</code> claiming a
+  "completeness guard".</li>
+<li><strong>Two "Generated — do not edit by hand" diagrams are actually hand-curated</strong>
+  and have silently drifted from the code they describe. <code>docs/agent-lifecycle.md</code>
+  places prompt assembly after <code>step/start</code> (code does it before,
+  <code>agent.ts:230</code> vs <code>:279</code>) and reverses <code>step/end</code> and <code>agent/request-error</code>;
+  the file's own line 1 says "Generated" while line 82 says "Maintenance mode:
+  curated". Nothing regenerates them, so nothing catches the drift.</li>
+<li><strong><code>docs/module-graph.md</code> hides the one real dependency cycle</strong> by drawing
+  only peer-dependency edges (<code>:6</code>), omitting the value import that closes the
+  <code>api-gateway → client-connection → host-apiproxy → api-remotes → api-gateway</code>
+  loop.</li>
+<li><strong>A code comment cites a <code>docs/testing.md</code> phrase that does not exist</strong>
+  (<code>vitest.config.ts:269</code> — "excessive tests are welcome"; grep finds nothing).</li>
+<li><strong>A phantom "golden truth" doctrine</strong> is cited inside the very skill library
+  that defines the dead-citation test (<code>.agents/skills/dsh-find-simplifications/SKILL.md:12</code>).</li>
+</ul>
+<p>The lesson is not that the machinery is bad — it is better than most. It is
+that automation created a false sense of coverage: the gates are load-bearing
+for <em>format and freshness</em> and silent about <em>correctness</em>, and the team's trust
+in green gates let generator bugs and hand-edits of "generated" files through.
+Their own postmortem 0002 states the same principle from the test side: <em>"A
+snapshot refresh is fixture production, not correctness review."</em></p>
+<h2>Individual findings</h2>
+<h3>1. Two god files</h3>
+<p><code>packages/host/apiproxy/src/api-proxy.ts</code> is 3,744 lines holding the entire
+host API surface — larger than the three core loop packages combined.
+<code>packages/core/tools/src/index.ts</code> is 1,946 lines holding registry, scoping,
+presentation, schema validation, code-mode transport, approval, and the whole
+execution pipeline in one class with five parallel <code>WeakMap</code>s. Both are the
+kind of file that becomes a merge-conflict magnet and a comprehension tax at
+this velocity.</p>
+<h3>2. CI has live holes, acknowledged in TODOs</h3>
+<p>No hosted post-merge validation right now (<code>serial-linux</code>/<code>serial-macos</code> are
+<code>if: false</code>), <strong>zero hosted macOS signal anywhere</strong>, and the <em>blocking</em> Windows
+check runs under Wine on Ubuntu while the real-Windows job is non-blocking — so
+a real-Windows-only regression can merge (<code>ci.yml:338-342</code>, <code>:620-622</code>). For a
+product shipping a Windows CLI with ACL sandboxing, this is a genuine gap.</p>
+<h3>3. The 100% coverage gate is hollowed out for the client half</h3>
+<p>51 of 69 coverage exclusions are <code>packages/client/*</code>, plus extensions,
+self-modification, and the Typert generator, with four <code>TODO(gui)</code> debt blocks
+and one negated-glob exclusion (<code>vitest.config.ts:169-268</code>). The headline
+"100% or it doesn't merge" is true for host/core and materially untrue for the
+GUI surface — which is also the lead product surface.</p>
+<h3>4. Advertised surfaces that do not ship</h3>
+<p><code>--profile tui</code> appears in <code>--help</code> and the README but has no bundle; it is a
+third-party GitHub repo (<code>turtle-ui</code>). <code>--host</code>/<code>--trusted-host</code> are dead flags
+from the CLI (the schema rejects the only value that would activate them), yet
+carry two whole test files and elaborate authority-canonicalization code. Real
+engineering pointed at capability that cannot be reached through a supported
+invocation.</p>
+<h3>5. The same framework bug worked around five times</h3>
+<p>Vendored Cordis <code>emit</code> starves later listeners on a sync throw
+(<code>vendor/cordis/src/events.ts:194-196</code>); harness code hand-rolls the same
+containment block in five places rather than fixing the framework it owns. The
+duplication detector misses it because identifiers differ.</p>
+<h3>6. Unbounded loops with no core ceiling</h3>
+<p>The step retry loop is <code>while (true)</code> with bounding delegated entirely to
+listeners (<code>agent.ts:339</code>); a misbehaving <code>agent/request-error</code> listener spins
+forever. The driver then swallows every failure at its boundary with no logger
+call (<code>agent.ts:212-215</code>), so a failed turn can produce zero operator-visible
+output.</p>
+<h3>7. <code>.agents/</code> is 22% of repo bytes that never ship and go unexplained</h3>
+<p>~714k English words plus Chinese twins, paid by every clone, unmentioned in the
+README, with a 428-file frozen-archive link graveyard (36% dead links by
+policy) and internal telemetry/registry hostnames and Figma URLs annotated as
+internal. No credentials leak, but the reconnaissance surface is real.</p>
+<h3>8. Developer-preview instability with no compatibility floor</h3>
+<p><code>AGENTS.md:7</code> and <code>SESSION_FORMAT_VERSION = 0</code> state that nothing is
+contractual and backends reject old on-disk formats. Eight releases in one day,
+a mid-flight version reset, and an access-visibility flip between rc's. Stored
+sessions have no migration path. This is honest and appropriate for a preview —
+but it means anything built on today's dsh will break.</p>
+<h3>9. Fragile patterns worth watching</h3>
+<p><code>JSON.stringify</code> structural equality in the load-bearing log invariant
+(key-order-sensitive false failures); a non-null assertion guarding what gets
+written to the durable log (<code>agent.ts:318-319</code>); invalid tool-call JSON
+degraded silently to a raw string (<code>tool-calls.ts:104-110</code>); parameter schemas
+open by default, forcing every tool to re-defend by hand; and scope bookkeeping
+in process-global <code>WeakMap</code>s that split silently if the package double-loads.</p>
+<h3>10. Documentation edges the machine does not reach</h3>
+<p><code>BENCHMARK.md</code> is 3 lines with no data and is governed by no gate; a
+release-blocking <code>FIXME</code> ships in reference docs
+(<code>docs/subsystems/llm-streaming.md:597</code>); two <code>TODO</code>s ride inside the generated
+config catalog; three subsystem pages are missing from the hand-maintained
+website manifest; and the postmortem corpus — the best self-knowledge in the
+repo — is not published on their own site. Only four postmortems exist for
+12,294 commits, which reads as under-recording rather than few incidents.</p>
+</main>
+</body>
+</html>

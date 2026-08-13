@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>How they build it — dsh review</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0f172a;color:#cbd5e1;font:16px/1.65 ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+main{max-width:920px;margin:0 auto;padding:24px 20px 80px}
+h1,h2,h3{color:#e2e8f0;line-height:1.25}
+h1{font-size:1.7rem;margin:.5em 0 .6em;border-bottom:1px solid #334155;padding-bottom:.4em}
+h2{font-size:1.3rem;margin-top:2em}
+h3{font-size:1.05rem;margin-top:1.6em}
+a{color:#2dd4bf;text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:#e2e8f0}
+em{color:#94a3b8}
+code{font-family:ui-monospace,Consolas,monospace;font-size:.86em;background:#1e293b;border:1px solid #334155;border-radius:4px;padding:.08em .35em;color:#e2e8f0;overflow-wrap:anywhere}
+pre{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:14px 16px;overflow-x:auto}
+pre code{background:none;border:none;padding:0}
+.tbl{overflow-x:auto;margin:1em 0}
+table{border-collapse:collapse;width:100%;font-size:.92em}
+th,td{border:1px solid #334155;padding:7px 10px;text-align:left;vertical-align:top}
+th{background:#1e293b;color:#e2e8f0}
+td code{white-space:nowrap}
+blockquote{border-left:3px solid #334155;margin:1em 0;padding:.2em 1em;color:#94a3b8}
+nav{background:#1e293b;border-bottom:1px solid #334155;padding:10px 20px;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.9em;position:sticky;top:0}
+nav a{color:#94a3b8}
+nav a.cur{color:#fb923c;font-weight:600}
+figure{margin:1.6em 0;background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px}
+figure svg{width:100%;height:auto;display:block;font-family:ui-sans-serif,system-ui,"Segoe UI",sans-serif}
+figcaption{color:#94a3b8;font-size:.85em;margin-top:10px;text-align:center}
+hr{border:none;border-top:1px solid #334155}
+</style>
+</head>
+<body>
+<nav><a href="index.html">Index</a> <a href="what-is-dsh.html">What is dsh</a> <a href="architecture.html">Architecture</a> <a href="capabilities-and-security.html">Capabilities & security</a> <a class="cur" href="how-they-build-it.html">How they build it</a> <a href="strengths.html">Strengths</a> <a href="weaknesses.html">Weaknesses</a> <a href="verdict.html">Verdict</a></nav>
+<main>
+<h1>How they build it: agent-driven development at 39 PRs/day</h1>
+<p>This chapter is the review's most novel content, because it is the part no
+product page shows. dsh is a live demonstration of how DeepSeek runs a large
+monorepo with agents doing most of the work.</p>
+<h2>Velocity</h2>
+<p>From <code>git log</code>:</p>
+<div class="tbl"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>First commit</td>
+<td><code>b67e81ac97</code>, 2026-06-10</td>
+</tr>
+<tr>
+<td>Upstream HEAD</td>
+<td><code>47f943859b</code>, 2026-08-13</td>
+</tr>
+<tr>
+<td>Elapsed</td>
+<td>64 calendar days, all 64 with commits</td>
+</tr>
+<tr>
+<td>Non-merge commits</td>
+<td>6,684 (~104/day)</td>
+</tr>
+<tr>
+<td>Total incl. merges</td>
+<td>12,294</td>
+</tr>
+<tr>
+<td>Highest PR number</td>
+<td>#2521 (~39 PRs/day)</td>
+</tr>
+<tr>
+<td>Author concentration</td>
+<td>one author 34%, top three 58%, ~20 total</td>
+</tr>
+</tbody>
+</table></div>
+<p>The branch namespaces tell the story: merges come from <code>worktree/*</code> (306) and
+<code>codex/*</code> (203) prefixes — parallel git worktrees and Codex-authored PRs — plus
+<code>agent/*</code>. A sample subject: <em>"Merge pull request #2512 from
+deepseek-harness/codex/2503-english-onboarding-copy"</em>. This is a small human
+team amplified by a fleet of agents running in isolated worktrees.</p>
+<p>The commit-type histogram shows the cost of that speed: <strong>33.6% <code>fix:</code> against
+10.3% <code>feat:</code></strong> — 3.3 fixes per feature, a build-then-repair signature
+consistent with high-throughput agent generation. The counterweight is
+discipline: 94.5% of commits follow conventional-commit format, and the revert
+rate is 0.40%.</p>
+<h2>The <code>.agents/</code> tree: 28% of the repo, unexplained in the README</h2>
+<p>2,078 tracked files — 28% of the repository by file count, 22% by bytes — live
+under <code>.agents/</code> and are never mentioned in the README. They are two things:</p>
+<p><strong>Agent Notes (<code>.agents/notes/</code>, 2,057 files).</strong> A decision-record corpus.
+<code>.agents/notes/README.md:5</code>: <em>"An Agent Note records a decision or proposal
+that affects this codebase — the why and what we gave up, the parts code and
+docs can't carry."</em> Path grammar is
+<code>{lifecycle}/{class}/yyyy-mm-dd-topic-title.md</code> with a closed lifecycle
+(<code>proposed</code>/<code>implemented</code>/<code>rejected</code> + frozen <code>archived/</code>) and a closed class
+set (<code>feature</code>/<code>bug-fix</code>/<code>simplification</code>/<code>architecture</code>/<code>process</code>/<code>testing</code>).
+There are <strong>686 English source notes</strong>, roughly 714k English words, doubled by
+Chinese translations. Writing one is mandatory: <code>AGENTS.md:122</code> — <em>"Non-trivial
+changes MUST include an Agent Note in the same PR; only mechanical/local edits
+are exempt."</em> They deliberately declined to automate the trivial/non-trivial
+judgment with a CI gate (that decision is itself recorded, in
+<code>.agents/notes/implemented/process/2026-07-19-require-agent-notes-for-non-trivial-changes.md:11</code>).</p>
+<p><strong>Skills (<code>.agents/skills/</code>, 11 workflows).</strong> These are loaded by the harness
+at runtime — <code>.agents/skills</code> is a first-class project skill root
+(<code>packages/skill/skill-filesystem/src/index.ts:247</code>), so running <code>dsh</code> inside
+this checkout auto-discovers DeepSeek's own internal workflows. They are the
+most revealing artifact in the repo:</p>
+<ul>
+<li><code>dsh-trim-cot-leakage</code> fights their own model's reasoning leaking into
+  committed prose. Its acceptance test (<code>SKILL.md:12</code>): <em>"could a reader at
+  HEAD, with no access to any session transcript, PR thread, or uncommitted
+  draft, resolve every reference and verify every claim?"</em> It ships tuned
+  regex "recall batteries" from an actual 2026-08 purge, including a Chinese
+  one, and a note that ripgrep skips dot-directories so <code>.agents/</code> was the
+  purge's biggest miss risk (<code>references/recall-batteries.md:7</code>).</li>
+<li><code>record-browser-gif</code> makes a demonstration GIF a merge gate for GUI changes
+  (<code>SKILL.md:14</code>) and forbids fixture fakery: <em>"use a real server ... a real
+  API key, and real model rounds. Never substitute fixture queries, mock
+  transports, synthetic event injection"</em> (<code>:16</code>).</li>
+<li><code>dsh-code-review</code> requires that assertions <em>"verify external state, logs,
+  events, or disposal rather than restating the implementation or trusting an
+  agent's report"</em> (<code>SKILL.md:41</code>).</li>
+</ul>
+<p>The skills target two vendor harnesses at once — Claude Code and Codex — with
+optional <code>agents/openai.yaml</code> sidecars kept aligned by
+<code>scripts/verify-skill-invocation-metadata.ts</code>. This is dogfooding taken to its
+limit: their internal agent-authoring rules ship in the exact format their
+product consumes.</p>
+<h3>The <code>.agents/</code> warts</h3>
+<ul>
+<li><strong>22% of repo bytes never ship and no external consumer can use them.</strong> The
+  root package is <code>private: true</code> and publishable packages use explicit file
+  allowlists, so <code>.agents/</code> is confirmed repo-only weight — but every clone
+  pays for ~714k words plus their Chinese twins, and the README explains none
+  of it.</li>
+<li><strong>The frozen archive is a 428-file link graveyard</strong> — 318 of 873 outbound
+  links in <code>archived/</code> are dead (36%), by policy: documentation gates skip
+  archived sources (<code>.agents/notes/README.md:42</code>).</li>
+<li><strong>Internal infrastructure is annotated as such.</strong> An internal telemetry
+  collector hostname (<code>.agents/notes/implemented/feature/2026-07-31-web-telemetry-default-mount.md:19</code>),
+  an internal npm registry, and eight Figma design URLs are present and
+  labeled internal — converting hostnames into reconnaissance hints. (No
+  credentials leak: a targeted scan found zero.)</li>
+<li><strong>A phantom citation inside the skill that defines the dead-citation test.</strong>
+  <code>dsh-find-simplifications/SKILL.md:12</code> tells the reader to consult <em>"the
+  tests-are-not-golden-truth and Agent Notes-are-not-golden-truth doctrines"</em>
+  in <code>AGENTS.md</code>. Grep for "golden" across <code>AGENTS.md</code> and <code>docs/</code> returns only
+  that line — there is no such doctrine. It is exactly the class-1 dead
+  citation the neighboring <code>dsh-trim-cot-leakage</code> skill exists to catch, and it
+  is prose, so no link checker can see it.</li>
+</ul>
+<h2>The documentation machine</h2>
+<p>The doc system is genuinely more elaborate than most production repos:</p>
+<ul>
+<li>A versioned tier taxonomy with word budgets, machine-enforced by
+  <code>verify-doc-budgets</code> (<code>docs/AGENTS.md:19-57</code>), and a self-applied anti-slop
+  checklist (<code>:59-71</code>) that forbids status annotations and emphasis inflation —
+  which is why <code>docs/</code> is nearly free of aspirational language.</li>
+<li>Generated catalogs with freshness verifiers: a 3,151-line config catalog
+  that cross-checks the runtime schema against the documented type, a
+  56-event producer/consumer matrix, a persistence catalog, a graph atlas.</li>
+<li>220 of 268 package READMEs carry a gate-enforced
+  <code>## Known Limitations and Deferred Work</code> section
+  (<code>scripts/verify-package-readme-limitations.ts:15</code>).</li>
+<li>A bilingual pipeline: every doc, non-vendor README, and active Agent Note is
+  a triple (English <code>.md</code>, Chinese <code>.zh.md</code>, hash-record <code>.i18n.yaml</code>) —
+  1,078 pairs repo-wide — kept in sync by a custom git merge driver.</li>
+<li><code>docs/postmortem/</code> — four incident write-ups whose stated purpose is <em>"why
+  our process let it through"</em> (<code>README.md:5</code>). These are the best warts source
+  in the repo: PM 0001 (an ACP crash that 178 green tests and 100% coverage
+  never caught, because no test used the real load path), PM 0002 (filesystem
+  tools silently disabled by a <code>!!js</code> expression in a non-interpolated field),
+  PM 0003 (their own web agent validating a replacement server instead of its
+  own GUI, three mistakes deep), PM 0004 (a Landlock notice misclassifying
+  child exit codes).</li>
+</ul>
+<h3>The doc machine's blind spot</h3>
+<p>For all that machinery, the drift we found clusters in the <em>generated and
+gated</em> docs, not the hand-written ones — the theme developed in
+<a href="weaknesses.html">weaknesses.html</a>. Additionally:</p>
+<ul>
+<li><strong><code>BENCHMARK.md</code> is a 3-line pointer with no data</strong>, and it is an orphan
+  governed by none of the ~30 doc gates (no <code>.zh.md</code>, absent from every
+  manifest). No benchmark result exists anywhere in the repo.</li>
+<li><strong>A <code>FIXME</code> ships in reference docs</strong> (<code>docs/subsystems/llm-streaming.md:597</code>)
+  even though <code>docs/development.md:157</code> defines an open <code>FIXME</code> as a
+  release-blocker.</li>
+<li><strong>Two <code>TODO</code>s ride inside the generated config catalog</strong>
+  (<code>docs/config-catalog.md:672</code>, <code>:709</code>) — source TODOs laundered into
+  published reference docs, invisible to the freshness gate.</li>
+<li><strong>The postmortem corpus is invisible on their own website</strong> — 85 of 110
+  English docs reach the published site; the best self-knowledge artifact is
+  among the 25 that do not.</li>
+</ul>
+<h2>Testing</h2>
+<p>The test story is strong. 216 of 219 packages have a <code>tests/</code> directory (the
+three without are defensible: a type-only utility, a tiny service seam, a demo).
+762 spec files, plus the build scripts test themselves (45 spec files under
+<code>scripts/</code>). The seven vitest configs are not redundancy — they are disjoint
+lanes separated by cost, credentials, and artifact dependency (<code>.spec.ts</code> unit,
+<code>.e2e.ts</code> token-spending real-API, <code>.snapshot.ts</code> replay, three web lanes),
+each with an explanatory header. Skipped tests are almost nonexistent: 8 across
+the whole repo, 6 of them conditional-on-platform-or-key, and zero <code>.only</code>,
+<code>.todo</code>, or <code>.fails</code>. The test-support packages provide a scriptable
+OpenAI-compatible mock server and a session-replay harness, and the policy is
+sound (<code>docs/testing.md:23</code>: <em>"Mock only the expensive or non-deterministic
+boundary ... keep everything downstream real"</em>).</p>
+<p>The headline coverage gate is 100% per-file — <em>"100% or it doesn't merge"</em>
+(<code>vitest.config.ts:269</code>). But it is <strong>substantially hollowed out for the
+client half</strong>: of 69 exclusion paths, 51 are <code>packages/client/*</code>, self-labeled
+as debt with four <code>TODO(gui)</code> blocks. One exclusion is a negated glob
+(everything except one file). The gate is true for the host/core half and
+materially untrue for Client, extensions, self-modification, and the Typert
+generator. There are also 631 <code>v8 ignore</code> comments repo-wide (each must carry a
+reason, but 631 is a large number against a "100%" claim) and two silent
+<code>describe.skip</code> blocks in the least-gated file in the repo, the Typert catalog
+generator.</p>
+<h2>CI and release</h2>
+<p>CI security hygiene is above average: an explicit, reasoned ban on
+<code>pull_request_target</code> (<code>.github/workflows/e2e.yml:20-24</code>), an <code>always()</code>
+verdict job so a skipped required check cannot read as passing, and
+trusted-branch policy checkout. But the current CI has real gaps:</p>
+<ul>
+<li><strong>Master pushes get almost no hosted validation.</strong> Every blocking job is
+  PR-gated, and the three hosted post-merge reference jobs are switched off
+  (<code>serial-linux</code> and <code>serial-macos</code> are <code>if: false</code>), acknowledged by
+  <code># TODO(hosted-serial-ci): Re-enable ... before release</code>. There is currently
+  <strong>zero hosted macOS signal anywhere</strong>.</li>
+<li><strong>The <em>blocking</em> Windows signal is Wine-on-Ubuntu, not Windows</strong>
+  (<code>ci.yml:338-342</code>). The real-Windows job is deliberately non-blocking, so a
+  real-Windows-only regression can merge — for a product that ships a Windows
+  CLI with ACL-based sandboxing.</li>
+</ul>
+<p>Release discipline, by contrast, is a highlight. Three independent publish
+families (dsh, vendored Cordis, native landlock-run). Publication is decided
+per package against the registry by tarball integrity — missing gets published,
+identical gets skipped, <em>differing fails the run</em>
+(<code>scripts/release/publish.ts:5-8</code>) — and every tarball is installed into a
+throwaway consumer outside the repo with the bin driven before release
+(<code>scripts/release/verify-packed-install.ts:14-17</code>). There is exactly <strong>one
+dependency patch</strong> in the entire 221-package tree
+(<code>pnpm-workspace.yaml:71-72</code>, an additive <code>node-pty</code> env override, not a bug
+fix) — remarkable restraint.</p>
+<p>The developer-preview churn is visible in the version line: eight
+<code>release(dsh)</code> commits landed on 2026-08-13 alone, the base version jumped
+<code>0.0.1-rc.5 → 0.1.0-rc.1</code> the same day (so the rc counter restarted, and
+<code>0.1.0-rc.4</code> never existed), and the "publish publicly" flip
+(<code>8c1e8d9890</code>) landed mid-sequence — anyone who installed an early rc got a
+different package-visibility contract than later ones.</p>
+<h2>Process cost</h2><figure><svg viewBox="0 0 860 260" role="img" aria-label="What one non-trivial change costs">
+<defs><marker id="a8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker></defs>
+<text x="145" y="28" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">one non-trivial change</text>
+<rect x="20" y="40" width="250" height="34" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="145" y="62" text-anchor="middle" fill="#94a3b8" font-size="11">the code edit</text>
+<rect x="20" y="80" width="250" height="34" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="145" y="102" text-anchor="middle" fill="#94a3b8" font-size="11">+ Agent Note (.md) — mandatory</text>
+<rect x="20" y="120" width="250" height="34" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="145" y="142" text-anchor="middle" fill="#94a3b8" font-size="11">+ Chinese twin (.zh.md)</text>
+<rect x="20" y="160" width="250" height="34" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="145" y="182" text-anchor="middle" fill="#94a3b8" font-size="11">+ hash record (.i18n.yaml)</text>
+<rect x="330" y="90" width="130" height="60" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="395" y="115" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">internal PR</text>
+<text x="395" y="134" text-anchor="middle" fill="#94a3b8" font-size="11">~39 per day</text>
+<line x1="270" y1="118" x2="328" y2="118" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a8)"/>
+<rect x="520" y="40" width="320" height="160" fill="#0f172a" stroke="#334155" rx="8"/>
+<text x="680" y="66" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">merge gates</text>
+<text x="680" y="90" text-anchor="middle" fill="#94a3b8" font-size="11">~30 doc verifiers (run-gates DAG, 14 modes)</text>
+<text x="680" y="110" text-anchor="middle" fill="#94a3b8" font-size="11">100%-per-file coverage (hollowed for client)</text>
+<text x="680" y="130" text-anchor="middle" fill="#94a3b8" font-size="11">bilingual sync via custom git merge driver</text>
+<text x="680" y="150" text-anchor="middle" fill="#fb923c" font-size="11.5">blocking Windows lane = Wine on Ubuntu</text>
+<text x="680" y="170" text-anchor="middle" fill="#94a3b8" font-size="11">conventional commits (94.5% observed)</text>
+<line x1="460" y1="118" x2="518" y2="118" stroke="#64748b" stroke-width="1.5" fill="none" marker-end="url(#a8)"/>
+<text x="430" y="240" text-anchor="middle" fill="#fb923c" font-size="11.5">&#8594; master — where pushes currently get almost no hosted post-merge validation</text>
+</svg><figcaption>The marginal cost of one non-trivial change: three extra files and a translation review, then ~30 gates.</figcaption></figure>
+<p>The machinery is not free. There are 158 files under <code>scripts/</code> (35 <code>verify-*</code>,
+17 <code>gen-*</code>, 12 <code>translation-*</code>), a 787-line knip config, an issue-management
+system of 1,119 lines for a repo that accepts no external contributions, and a
+whole CI workflow whose only job is to reject filenames containing "golden".
+Much of it is well-organized (a single <code>run-gates.ts</code> DAG orchestrates the
+verify scripts into 14 named modes, with a cycle detector). But the marginal
+cost of a non-trivial change is real: source edit, plus an Agent Note, plus its
+Chinese translation, plus hash records — three extra files and a translation
+review, every time.</p>
+</main>
+</body>
+</html>
