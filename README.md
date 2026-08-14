@@ -83,4 +83,6 @@ The repository was renamed from `deepseek-harness-deepdive` to
 `dsh-harness-deepdive` on 2026-08-13. Google Safe Browsing had flagged the old
 URL as phishing, because a vendor name inside a path on a personal
 `github.io` host reads as brand impersonation to an automated classifier. The
-pages themselves contain no scripts, no forms, and no external requests.
+pages themselves contain no scripts, no forms, and no external requests. The
+full write-up is in
+[INCIDENT-safe-browsing-phishing-flag.md](INCIDENT-safe-browsing-phishing-flag.md).
