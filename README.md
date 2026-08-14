@@ -1,10 +1,14 @@
-# deepseek-harness deepdive
+# dsh harness deepdive
 
-An independent, warts-and-all review of **DeepSeek Harness (`dsh`)** — DeepSeek's
-open-source agent harness — published here as 8 self-contained HTML pages with
-diagrams.
+> **Independent and unaffiliated.** This is a third-party review written by
+> az9713. It is not published, operated, or endorsed by DeepSeek, and it does
+> not represent or imitate DeepSeek or any DeepSeek service. It asks for no
+> credentials, hosts no downloads, and runs no scripts.
 
-**Read it: https://az9713.github.io/deepseek-harness-deepdive/**
+A warts-and-all review of **DeepSeek Harness (`dsh`)**, an open-source agent
+harness, published here as 8 self-contained HTML pages with diagrams.
+
+**Read it: https://az9713.github.io/dsh-harness-deepdive/**
 
 ## Which version this reviews
 
@@ -55,15 +59,15 @@ Three colours carry meaning throughout:
 
 ## How to view
 
-Online, at **https://az9713.github.io/deepseek-harness-deepdive/**.
+Online, at **https://az9713.github.io/dsh-harness-deepdive/**.
 
 Or locally. The pages are self-contained — the CSS and the SVG diagrams are
 inside each file and nothing loads from the network — so a clone works with no
 build step:
 
 ```
-git clone https://github.com/az9713/deepseek-harness-deepdive.git
-cd deepseek-harness-deepdive
+git clone https://github.com/az9713/dsh-harness-deepdive.git
+cd dsh-harness-deepdive
 start index.html      # Windows; use "open" on macOS, "xdg-open" on Linux
 ```
 
@@ -72,6 +76,11 @@ Use the Pages link above, or a local clone, to read it as intended.
 
 ## Status
 
-Independent and unaffiliated. This is not a DeepSeek publication, and it is not
-endorsed by the deepseek-harness authors. Upstream accepts no external pull
-requests, so nothing here was submitted to them.
+Independent and unaffiliated, as stated at the top. Upstream accepts no external
+pull requests, so nothing here was submitted to them.
+
+The repository was renamed from `deepseek-harness-deepdive` to
+`dsh-harness-deepdive` on 2026-08-13. Google Safe Browsing had flagged the old
+URL as phishing, because a vendor name inside a path on a personal
+`github.io` host reads as brand impersonation to an automated classifier. The
+pages themselves contain no scripts, no forms, and no external requests.
